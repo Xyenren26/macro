@@ -1,0 +1,28 @@
+{
+    "english": [
+        "Search No",
+        "Reference model",
+        "Contents",
+        "Before correction",
+        "After correction",
+        "Type 1",
+        "Type 2",
+        "Type 3",
+        "Type 4",
+        "Type 5",
+        "Echo"
+    ],
+    "japanese": [
+        "検索No.",
+        "参考機種",
+        "内容",
+        "訂正前",
+        "訂正後",
+        "分類1",
+        "分類2",
+        "分類3",
+        "分類4",
+        "分類5",
+        "gelo"
+    ]
+}
