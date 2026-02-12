@@ -1,5 +1,12 @@
 {
     "English": {
+        "TypeInfo": {
+            "1": {"title": "Type 1", "details": "Primary category"},
+            "2": {"title": "Type 2", "details": "Secondary category"},
+            "3": {"title": "Type 3", "details": "Tertiary category"},
+            "4": {"title": "Type 4", "details": "Additional category"},
+            "5": {"title": "Type 5", "details": "Extra category"}
+        },
         "app_title": "Diagram Management",
         "add_entry": "Add Entry",
         "settings": "Settings",
@@ -8,6 +15,8 @@
         "pdf_exists": "PDF Found",
         "pdf_missing": "No PDF",
         "pdf_preview": "PDF Preview",
+        "pdf_header": "PDF",
+        "pdf_replaced": "The PDF file has been successfully replaced.",
         "open_pdf": "Open PDF",
         "close": "Close",
         "error": "Error",
@@ -40,9 +49,26 @@
         "save_changes": "Save Changes",
         "cancel": "Cancel",
         "export_filtered": "Export Filtered" ,
-        "no_data_to_export": "No data to export"  
+        "no_data_to_export": "No data to export" ,
+        "success": "Success",
+        "column_added": "Column '{col}' was added successfully.",
+        "column_removed": "Column '{col}' was removed successfully.",
+        "column_exists": "Column '{col}' already exists.",
+        "add_failed": "Failed to add column",
+        "remove_failed": "Failed to remove column",
+        "no_selection": "No column selected.",
+        "invalid_column_name": "Invalid column name.",
+        "clear_filters": "Clear Filter"
     },
     "Japanese": {
+        "TypeInfo": {
+            "1": {"title": "タイプ1", "details": "主要カテゴリ"},
+            "2": {"title": "タイプ2", "details": "二次カテゴリ"},
+            "3": {"title": "タイプ3", "details": "三次カテゴリ"},
+            "4": {"title": "タイプ4", "details": "追加カテゴリ"},
+            "5": {"title": "タイプ5", "details": "その他カテゴリ"}
+        },
+
         "app_title": "図管理",
         "add_entry": "新規追加",
         "settings": "設定",
@@ -51,6 +77,8 @@
         "pdf_exists": "PDFあり",
         "pdf_missing": "PDFなし",
         "pdf_preview": "PDFプレビュー",
+        "pdf_header": "PDFファイル",
+        "pdf_replaced": "PDFファイルが正常に置き換えられました。",
         "open_pdf": "PDFを開く",
         "close": "閉じる",
         "error": "エラー",
@@ -83,6 +111,15 @@
         "save_changes": "変更を保存",
         "cancel": "キャンセル",
         "export_filtered": "フィルター出力" ,
-        "no_data_to_export": "出力するデータがありません"
+        "no_data_to_export": "出力するデータがありません",
+        "success": "成功",
+        "column_added": "列「{col}」が正常に追加されました。",
+        "column_removed": "列「{col}」が正常に削除されました。",
+        "column_exists": "列「{col}」はすでに存在します。",
+        "add_failed": "列の追加に失敗しました",
+        "remove_failed": "列の削除に失敗しました",
+        "no_selection": "列が選択されていません。",
+        "invalid_column_name": "無効な列名です。",
+        "clear_filters": "Clear Filter(japanese)"
     }
 }
