@@ -5,11 +5,13 @@
         "Contents",
         "Before correction",
         "After correction",
-        "Type 1",
-        "Type 2",
-        "Type 3",
-        "Type 4",
-        "Type 5"
+        "Model Name",
+        "Target Part Name",
+        "Motor Specification",
+        "Issue Classification",
+        "Update Info",
+        "Upload Date",
+        "Added By"
     ],
     "japanese": [
         "検索No.",
@@ -17,10 +19,26 @@
         "内容",
         "訂正前",
         "訂正後",
-        "分類1",
-        "分類2",
-        "分類3",
-        "分類4",
-        "分類5"
-    ]
+        "機種名",
+        "対象部品名",
+        "モータ仕様",
+        "指摘項目の分類",
+        "更新情報",
+        "アップロード日",
+        "追加者"
+    ],
+    "visible": {
+        "Search No": true,
+        "Reference model": true,
+        "Contents": false,
+        "Before correction": false,
+        "After correction": false,
+        "Model Name": true,
+        "Target Part Name": true,
+        "Motor Specification": true,
+        "Issue Classification": true,
+        "Update Info": true,
+        "Upload Date": false,
+        "Added By": false
+    }
 }

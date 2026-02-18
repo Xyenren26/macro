@@ -1,0 +1,68 @@
+{
+  "Model Name": [
+    "WR18",
+    "WR19",
+    "その他",
+    "機種共通"
+  ],
+  "Target Part Name": [
+    "MOTOR ASSY",
+    "ARMATURE ASSY (UNIT)",
+    "ARMATURE SHAFT",
+    "BRUSH CARBON",
+    "BRUSH HOLDER ASSY",
+    "BRUSH UNIT",
+    "CAPACITOR",
+    "COIL CHOKE",
+    "COMMUTATOR",
+    "CORE (UNIT)",
+    "COVER UNIT GEAR",
+    "CUSHION RUBBER",
+    "DAMPER",
+    "FILTER",
+    "FRAME (UNIT)",
+    "LABEL",
+    "MAGNET",
+    "MAGNET SENSOR",
+    "METAL",
+    "MOTOR (SUB) UNIT",
+    "MOTOR SUB ASSY",
+    "O RING",
+    "PCB ASSY",
+    "PCB COVER",
+    "PTC",
+    "SCREW",
+    "SHAFT(出力軸)",
+    "SPACER END",
+    "SPRING BRUSH",
+    "STATOR_ASSY",
+    "STAY BRUSH HOLDER",
+    "TERMINAL",
+    "WHEEL,WORM GEAR, (UNIT)",
+    "WORM",
+    "YOKE",
+    "YOKE BLANK",
+    "YOKE UNIT"
+  ],
+  "Motor Specification": [
+    "仕様共通",
+    "一般",
+    "機電",
+    "SLP",
+    "可動軸",
+    "固定軸",
+    "防水",
+    "非防水"
+  ],
+  "Issue Classification": [
+    "注記",
+    "表",
+    "外観図",
+    "特性グラフ",
+    "客先仕様表",
+    "その他"
+  ],
+  "Update Info": [
+    "全適済み"
+  ]
+}
