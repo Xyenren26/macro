@@ -1,8 +1,10 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
+import win32com.client  # Requires pywin32 installed (Windows only)
 import webbrowser
 import pandas as pd
 import os
+import sys
 import getpass
 import subprocess
 import time
@@ -14,54 +16,83 @@ from openpyxl import load_workbook
 from openpyxl import Workbook
 from openpyxl.styles import Font
 from datetime import datetime
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+from openpyxl.styles import PatternFill, Font, Alignment
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.table import Table, TableStyleInfo
+import threading
+import zipfile
 
 # ===============================
 # CONFIG & CONSTANTS
 # ===============================
 CONFIG_FILE = "config.json"
-COLUMNS_FILE = "columns.json"
+
 DEFAULT_CONFIG = {
     "excel_path": "excel/diagram_list.xlsx",
     "pdf_dir": "pdf",
     "language": "English"
 }
 DEFAULT_COLUMNS = {
-    "english": ["Search No","Reference model","Contents","Before correction","After correction",
-                "Model Name","Target Part Name","Motor Specification","Issue Classification","Update Info",
-                "Added By","Upload Date"],
-    "japanese": ["検索No.","参考機種","内容","訂正前","訂正後",
+    "english": ["Search No","Reference model","Contents","Before correction","After correction",  "Verification Meeting – Implementation Period",
+                "Record No.", "Model Name","Target Part Name","Motor Specification","Issue Classification","Update Info",
+                "Updated By","Upload Date"],
+    "japanese": ["検索No.","参考機種","内容","訂正前","訂正後", "検証会_実施期","記録No.",
                  "機種名","対象部品名","モータ仕様","指摘項目の分類","更新情報",
-                 "追加者","アップロード日"]
+                 "更新者","アップロード日"]
 }
-
 
 username = getpass.getuser()
 
 upload_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-
 def load_config():
+    # Try reading the config file first
     if not os.path.exists(CONFIG_FILE):
         return DEFAULT_CONFIG.copy()
+    
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             config = json.load(f)
-            return config
     except (json.JSONDecodeError, OSError):
-        # If file is corrupted or unreadable, use defaults
-        try:
-            with open("lang.json", "r", encoding="utf-8") as lf:
-                lang_text = json.load(lf)
-            warning_title = lang_text.get("config_warning", "Warning")
-            warning_msg = lang_text.get("config_msg", "Configuration error — using default settings")
-        except Exception:
-            # Fallback if lang.json is missing or broken
-            warning_title = "Warning"
-            warning_msg = "Configuration error — using default settings"
-
-        messagebox.showwarning(warning_title, warning_msg)
+        show_config_warning("Configuration file is corrupted or unreadable. Using default settings.")
         return DEFAULT_CONFIG.copy()
 
+    # Now validate network paths
+    excel_path = config.get("excel_path")
+    pdf_dir = config.get("pdf_dir")
+
+    paths_ok = True
+    missing_paths = []
+
+    if excel_path and not os.path.exists(excel_path):
+        paths_ok = False
+        missing_paths.append(f"Excel file: {excel_path}")
+
+    if pdf_dir and not os.path.isdir(pdf_dir):
+        paths_ok = False
+        missing_paths.append(f"PDF directory: {pdf_dir}")
+
+    if not paths_ok:
+        missing_str = "\n".join(missing_paths)
+        show_config_warning(f"The following paths are unreachable:\n{missing_str}\nUsing default settings instead.")
+        return DEFAULT_CONFIG.copy()
+
+    return config
+
+def show_config_warning(msg):
+    try:
+        with open("lang.json", "r", encoding="utf-8") as lf:
+            lang_text = json.load(lf)
+        warning_title = lang_text.get("config_warning", "Warning")
+        warning_msg = lang_text.get("config_msg", msg)
+    except Exception:
+        warning_title = "Warning"
+        warning_msg = msg
+
+    messagebox.showwarning(warning_title, warning_msg)
+    
 def save_config(cfg):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=4, ensure_ascii=False)
@@ -71,18 +102,48 @@ def load_columns():
         with open(COLUMNS_FILE, "w", encoding="utf-8") as f:
             json.dump(DEFAULT_COLUMNS, f, indent=4, ensure_ascii=False)
         return DEFAULT_COLUMNS.copy()
-    with open(COLUMNS_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+
+    try:
+        with open(COLUMNS_FILE, "r", encoding="utf-8") as f:
+            columns = json.load(f)
+
+            # Merge with defaults so missing keys don’t break things
+            merged = DEFAULT_COLUMNS.copy()
+            merged.update(columns)
+            return merged
+    except (json.JSONDecodeError, OSError) as e:
+        try:
+            with open("lang.json", "r", encoding="utf-8") as lf:
+                lang_text = json.load(lf)
+            warning_title = lang_text.get("columns_warning", "Warning")
+            warning_msg = lang_text.get("columns_msg", "Columns file error — using defaults")
+        except Exception:
+            warning_title = "Warning"
+            warning_msg = "Columns file error — using defaults"
+
+        messagebox.showwarning(warning_title, warning_msg)
+
+        # Reset file to defaults so next run is clean
+        with open(COLUMNS_FILE, "w", encoding="utf-8") as f:
+            json.dump(DEFAULT_COLUMNS, f, indent=4, ensure_ascii=False)
+
+        return DEFAULT_COLUMNS.copy()
 
 def save_columns(columns):
     with open(COLUMNS_FILE, "w", encoding="utf-8") as f:
         json.dump(columns, f, indent=4, ensure_ascii=False)
 
 config = load_config()
-columns_data = load_columns()
-
 EXCEL_PATH = config["excel_path"]
 PDF_DIR = config["pdf_dir"]
+
+# Build columns.json path one level up from the Excel folder
+excel_dir = os.path.dirname(EXCEL_PATH)       # .../excel/
+parent_dir = os.path.dirname(excel_dir)       # go outside the excel folder
+COLUMNS_FILE = os.path.join(parent_dir, "columns.json")
+
+columns_data = load_columns()
+
 DEFAULT_LANG = config.get("language", "Japanese")
 os.makedirs(PDF_DIR, exist_ok=True)
 
@@ -92,13 +153,15 @@ JAPANESE_COLUMNS = columns_data["japanese"]
 # ===============================
 # LANGUAGE TEXT
 # ===============================
-with open("lang.json", "r", encoding="utf-8") as f:
+LANG_FILE = os.path.join(parent_dir, "lang.json")
+with open(LANG_FILE, "r", encoding="utf-8") as f:
     LANG_TEXT = json.load(f)
 
 # ===============================
 # LOAD JSON DROPDOWN
 # ===============================
-with open("dropdowns.json", "r", encoding="utf-8") as f: 
+DROPDOWN_FILE = os.path.join(parent_dir, "dropdowns.json")
+with open(DROPDOWN_FILE, "r", encoding="utf-8") as f: 
     DROPDOWN_OPTIONS = json.load(f)
 
 # ===============================
@@ -111,13 +174,35 @@ def load_excel():
     clean_df = pd.DataFrame({col: df[col] if col in df.columns else "" for col in COLUMNS})
     return clean_df.applymap(lambda x: x.strip() if isinstance(x, str) else x)
 
+def safe_load_excel():
+    for attempt in range(5):
+        try:
+            df = pd.read_excel(EXCEL_PATH, dtype=str, engine="openpyxl").fillna("")
+            clean_df = pd.DataFrame({col: df[col] if col in df.columns else "" for col in COLUMNS})
+            return clean_df.map(lambda x: x.strip() if isinstance(x, str) else x)
+        except (PermissionError, ValueError, OSError, zipfile.BadZipFile) as e:
+            # print(f"Retrying load_excel (attempt {attempt+1}) due to: {e}")
+            time.sleep(0.5)
+    # print("Failed to load Excel after retries")
+    return pd.DataFrame(columns=COLUMNS)
+
+
 def save_excel(df):
     os.makedirs(os.path.dirname(EXCEL_PATH), exist_ok=True)
     df[COLUMNS].to_excel(EXCEL_PATH, index=False)
 
-def export_excel(df, lang):
+def export_excel(df, lang, master_list):
     headers = JAPANESE_COLUMNS if lang == "Japanese" else COLUMNS
-    file = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel","*.xlsx")])
+
+    # Build default filename: YYYY-MM-DD_AppTitle.xlsx 
+    today = datetime.now().strftime("%Y-%m-%d")
+    default_name = f"{today}_{master_list}.xlsx"
+
+    file = filedialog.asksaveasfilename(
+        defaultextension=".xlsx",
+        initialfile=default_name,
+        filetypes=[("Excel","*.xlsx")]
+    )
     if not file:
         return
 
@@ -127,36 +212,69 @@ def export_excel(df, lang):
     # Write headers (include PDF column)
     ws.append(headers + ["PDF"])
 
+    # Write data rows
     for _, row in df.iterrows():
         values = [row.get(c, "") for c in COLUMNS]
-
         pdf_path = find_pdf(row.get("Search No", ""))
         if pdf_path:
-            # Use relative path from Excel file location
-            rel_path = os.path.relpath(pdf_path, os.path.dirname(file))
             pdf_name = os.path.basename(pdf_path)
-
-            # Append row first
             ws.append(values + [pdf_name])
-
-            # Add hyperlink to the last cell
             cell = ws.cell(row=ws.max_row, column=len(values) + 1)
-            cell.hyperlink = rel_path
+            try:
+                rel_path = os.path.relpath(pdf_path, os.path.dirname(file))
+                cell.hyperlink = rel_path
+            except ValueError:
+                cell.hyperlink = pdf_path
             cell.font = Font(color="0000FF", underline="single")
         else:
             ws.append(values + ["Missing"])
 
+    # Define table range (from A1 to last row/column)
+    end_col = get_column_letter(ws.max_column)
+    end_row = ws.max_row
+    table_ref = f"A1:{end_col}{end_row}"
+
+    # Create table with Dark Teal, Table Style Medium 2
+    table = Table(displayName="ExportTable", ref=table_ref)
+    style = TableStyleInfo(
+        name="TableStyleMedium2",  # Dark Teal style
+        showFirstColumn=False,
+        showLastColumn=False,
+        showRowStripes=True,
+        showColumnStripes=False
+    )
+    table.tableStyleInfo = style
+    ws.add_table(table)
+
+    # Auto-fit column widths
+    for col in ws.columns:
+        max_length = 0
+        col_letter = get_column_letter(col[0].column)
+        for cell in col:
+            if cell.value:
+                max_length = max(max_length, len(str(cell.value)))
+        ws.column_dimensions[col_letter].width = max_length + 2
+
+    # Save file
     wb.save(file)
+
+    # Auto-open the file
+    if sys.platform.startswith("darwin"):  # macOS
+        subprocess.call(["open", file])
+    elif os.name == "nt":  # Windows
+        os.startfile(file)
+    elif os.name == "posix":  # Linux
+        subprocess.call(["xdg-open", file])
 
     messagebox.showinfo(
         LANG_TEXT[lang]["export_done"],
         LANG_TEXT[lang]["export_msg"].format(file=file)
     )
 
+
 # ===============================
 # EXCEL LOCK FUNCTION (For Saving don't remove - echo)
 # ===============================
-
 LOCK_FILE = EXCEL_PATH + ".lock"
 
 def acquire_lock(retries=10, delay=1):
@@ -189,6 +307,13 @@ def save_excel_with_lock(df, path=EXCEL_PATH, retries=5, delay=1):
 
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
+
+        # Refresh latest Excel after acquiring lock
+        if os.path.exists(path):
+            latest_df = pd.read_excel(path, dtype=str).fillna("")
+        else:
+            latest_df = pd.DataFrame(columns=COLUMNS)
+
         for attempt in range(retries):
             try:
                 df[COLUMNS].to_excel(path, index=False)
@@ -198,6 +323,7 @@ def save_excel_with_lock(df, path=EXCEL_PATH, retries=5, delay=1):
         raise Exception("Could not save Excel file after multiple retries")
     finally:
         release_lock()
+
 
 # ===============================
 # PDF HANDLING
@@ -222,26 +348,139 @@ def generate_pdf_thumbnail(pdf_path, width=700):
     return ImageTk.PhotoImage(img)
 
 # ===============================
-# MULTI-SELECT DROPDOWN
+# WATCHDOG IMPLEMENTATION USED TO MAKE THE TREE DATA LIVE
+# ===============================
+def load_columns_json(path=COLUMNS_FILE):
+    import json, os
+    if not os.path.exists(path):
+        # return default structure if missing
+        return {
+            "english": [],
+            "japanese": [],
+            "visible": {}
+        }
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    # ensure keys exist
+    if "english" not in data:
+        data["english"] = []
+    if "japanese" not in data:
+        data["japanese"] = []
+    if "visible" not in data:
+        data["visible"] = {}
+    return data
+
+class ExcelHandler(FileSystemEventHandler):
+    def __init__(self, filepath, app):
+        self.filepath = os.path.abspath(filepath)
+        self.app = app
+        self.last_update = 0
+        self.popup_scheduled = False  # prevent multiple popups
+
+    def on_any_event(self, event):
+        if event.is_directory:
+            return
+
+        filename = os.path.basename(event.src_path)
+        if filename.startswith("~$") or filename.endswith(".tmp"):
+            return
+
+        if os.path.normcase(os.path.abspath(event.src_path)) == os.path.normcase(self.filepath):
+            now = time.time()
+            if now - self.last_update < 2:  # debounce
+                return
+            self.last_update = now
+
+            try:
+                new_df = safe_load_excel()
+                self.app.columns_data = load_columns_json()
+                global COLUMNS, JAPANESE_COLUMNS
+                COLUMNS = self.app.columns_data["english"]
+                JAPANESE_COLUMNS = self.app.columns_data["japanese"]
+                self.app.columns_visibility = self.app.columns_data.get(
+                    "visible", {col: True for col in self.app.columns_data["english"]}
+                )
+
+                def update_ui():
+                    self.app.update_headers()
+                    self.app.refresh_table(new_df)
+                    if not self.popup_scheduled:
+                        self.popup_scheduled = True
+                        messagebox.showinfo(
+                            LANG_TEXT[self.app.lang].get("excel_update_title", "Info"),
+                            LANG_TEXT[self.app.lang].get("excel_update_msg", "Excel file updated and headers refreshed.")
+                        )
+                        self.popup_scheduled = False  # reset after closing
+
+                self.app.after(0, update_ui)
+
+                # --- Update dropdowns.json ---
+                try:
+                    with open(DROPDOWN_FILE, "r", encoding="utf-8") as f:
+                        dropdowns = json.load(f)
+                except FileNotFoundError:
+                    dropdowns = {}
+                global DROPDOWN_OPTIONS
+                DROPDOWN_OPTIONS = dropdowns
+
+            except PermissionError:
+                warning_msg = LANG_TEXT[self.app.lang].get(
+                    "excel_lock_warning",
+                    "Excel is currently open/locked — syncing will resume shortly."
+                )
+                if not self.popup_scheduled:
+                    self.popup_scheduled = True
+                    self.app.after(0, lambda msg=warning_msg: (
+                        messagebox.showinfo(LANG_TEXT[self.app.lang].get("excel_warning_title", "Warning"), msg),
+                        setattr(self, "popup_scheduled", False)
+                    ))
+                time.sleep(1)
+
+            except Exception as e:
+                print(f"[Watchdog] Failed to sync Excel: {e}")
+                    
+# ===============================
+# MULTI-SELECT DROPDOWN (White Theme + Hover)
 # ===============================
 class MultiSelectDropdown(tk.Frame):
-
-    def __init__(self, parent, values, label="All", width=20, callback=None):
+    def __init__(self, parent, values, lang_text, lang="English", width=20, callback=None):
         super().__init__(parent)
 
         self.values = values
         self.selected = []
         self.callback = callback
         self.width = width
-        self.default_label = label
+        self.lang_text = lang_text
+        self.lang = lang
 
+        # Localized labels
+        self.default_label = self.get_text("all_label", default="All")
+        self.selected_label = self.get_text("selected_label", default="selected")
+
+        # White button with hover
         self.button = tk.Button(
             self,
             text=self.default_label,
             width=self.width,
+            fg="#333333",
+            bg="white",
+            activebackground="#f0f0f0",
+            activeforeground="#007acc",
+            font=("Segoe UI", 9, "bold"),
+            bd=1,
+            relief="solid",
+            cursor="hand2",
             command=self.toggle_menu
         )
-        self.button.pack()
+        self.button.pack(padx=3, pady=3)
+
+        # Hover effect
+        self.button.bind("<Enter>", lambda e: self.button.configure(bg="#f9f9f9"))
+        self.button.bind("<Leave>", lambda e: self.button.configure(bg="white"))
+
+    def get_text(self, key, default=""):
+        """Fetch localized text from lang.json"""
+        return self.lang_text.get(self.lang, {}).get(key, default)
 
     def toggle_menu(self):
         menu = tk.Toplevel(self)
@@ -250,6 +489,8 @@ class MultiSelectDropdown(tk.Frame):
         x = self.winfo_rootx()
         y = self.winfo_rooty() + self.winfo_height()
         menu.geometry(f"+{x}+{y}")
+
+        menu.configure(bg="white", bd=1, relief="solid")
 
         self.vars = {}
 
@@ -261,9 +502,19 @@ class MultiSelectDropdown(tk.Frame):
                 text=v,
                 variable=var,
                 command=self.update_selection,
-                anchor="w"
+                anchor="w",
+                bg="white",
+                fg="#333333",
+                activebackground="#f0f0f0",
+                activeforeground="#007acc",
+                selectcolor="#f0f8ff",
+                font=("Segoe UI", 9)
             )
-            chk.pack(fill="x", padx=5)
+            chk.pack(fill="x", padx=5, pady=2)
+
+            # Hover effect for each option
+            chk.bind("<Enter>", lambda e, c=chk: c.configure(bg="#f9f9f9"))
+            chk.bind("<Leave>", lambda e, c=chk: c.configure(bg="white"))
 
             self.vars[v] = var
 
@@ -282,7 +533,7 @@ class MultiSelectDropdown(tk.Frame):
         elif len(self.selected) == 1:
             self.button.config(text=self.selected[0])
         else:
-            self.button.config(text=f"{len(self.selected)} selected")
+            self.button.config(text=f"{len(self.selected)} {self.selected_label}")
 
         if self.callback:
             self.callback()
@@ -334,10 +585,19 @@ class DiagramApp(tk.Tk):
         # --- Table setup ---
         self.update_headers()
         self.refresh_table(self.df)
-
+        self.start_excel_watcher(EXCEL_PATH)
 
     def t(self, key):
         return LANG_TEXT[self.lang][key]
+
+    # ---------- WATCHDOG Don't Touch ----------
+    def start_excel_watcher(self, filepath):
+        handler = ExcelHandler(filepath, self)
+        observer = Observer()
+        watch_dir = os.path.dirname(filepath) or "."  # ensure valid directory
+        observer.schedule(handler, path=watch_dir, recursive=False)
+        observer.start()
+        threading.Thread(target=lambda: observer.join(), daemon=True).start()
 
     # ---------- Styles ----------
     def create_styles(self):
@@ -362,11 +622,10 @@ class DiagramApp(tk.Tk):
                     current_tags.remove("even")
             self.tree.item(item, tags=current_tags)
 
+        # Background striping only
         self.tree.tag_configure("even", background="#d6e6f2")   # soft light blue
         self.tree.tag_configure("odd", background="#eaf1f8")    # very soft blue/white
-        self.tree.tag_configure("exists", foreground="#27ae60") # green
-        self.tree.tag_configure("missing", foreground="#c0392b")# red
-        self.tree.tag_configure("hover", background="#084a72")  # hover effect
+        self.tree.tag_configure("hover", background="#004274")  # hover effect
 
     def create_ui(self):
         # ===============================
@@ -376,13 +635,14 @@ class DiagramApp(tk.Tk):
         header.pack(fill="x")
         header.pack_propagate(False)
 
+
         self.title_lbl = tk.Label(
             header,
             text=self.t("app_title") if hasattr(self, "t") else "Document Manager",
             fg="#005f99",
-            font=("Segoe UI", 25, "bold")
+            font=("Segoe UI", 20, "bold")
         )
-        self.title_lbl.pack(side="left", padx=25)
+        self.title_lbl.pack(side="left", padx=20)
 
         self.settings_btn = tk.Button(
             header,
@@ -391,13 +651,15 @@ class DiagramApp(tk.Tk):
             bg="#005f99",
             activebackground="#005f99",
             activeforeground="white",
-            font=("Segoe UI", 10, "bold"),
-            bd=0,
+            font=("Segoe UI", 10),
             padx=10,
             pady=5,
+            bd=1,
+            relief="solid",
             cursor="hand2",
             command=self.open_settings
         )
+
         self.export_btn = tk.Button(
             header,
             text=self.t("export_excel") if hasattr(self, "t") else "Export Excel",
@@ -405,12 +667,13 @@ class DiagramApp(tk.Tk):
             bg="#005f99",
             activebackground="#005f99",
             activeforeground="white",
-            font=("Segoe UI", 10, "bold"),
-            bd=0,
+            font=("Segoe UI", 10),
             padx=10,
             pady=5,
+            bd=1,
+            relief="solid",
             cursor="hand2",
-            command=lambda: export_excel(self.df, self.lang)
+            command=lambda: export_excel(self.df, self.lang, self.t("master_list"))
         )
         self.export_btn.pack(side="right", padx=10)
         self.settings_btn.pack(side="right", padx=10)
@@ -465,13 +728,23 @@ class DiagramApp(tk.Tk):
             activebackground="#3399cc",
             activeforeground="white",
             font=("Segoe UI", 10, "bold"),
-            bd=0,
             padx=10,
             pady=5,
+            bd=1,
+            relief="solid",
             cursor="hand2",
             command=self.export_filtered
         )
         self.export_filtered_btn.pack(side="right", padx=5)
+
+        def add_hover_effect(widget, normal_bg="#005f99", hover_bg="#3399cc", fg="white"):
+            widget.bind("<Enter>", lambda e: widget.configure(bg=hover_bg, fg=fg))
+            widget.bind("<Leave>", lambda e: widget.configure(bg=normal_bg, fg=fg))
+
+        # Apply to both buttons
+        add_hover_effect(self.settings_btn)
+        add_hover_effect(self.export_btn)
+        add_hover_effect(self.export_filtered_btn)
 
         # ===============================
         # Table Section
@@ -486,6 +759,9 @@ class DiagramApp(tk.Tk):
         style.configure("Treeview.Heading", font=("Segoe UI", 11, "bold"),
                         background="#005f99", foreground="white")
 
+        style.map("Treeview.Heading", 
+                background=[("active", "#004274"), ("pressed", "#3399cc")], 
+                foreground=[("active", "white"), ("pressed", "white")] )
         self.tree = ttk.Treeview(container, columns=COLUMNS + ["PDF"], show="headings")
 
         # Scrollbars
@@ -504,8 +780,15 @@ class DiagramApp(tk.Tk):
 
         # Right-click context menu
         self.menu = tk.Menu(self, tearoff=0)
-        self.menu.add_command(label="Edit", command=self.edit_selected_row)
-        self.menu.add_command(label="Delete", command=self.delete_selected_row)
+        self.menu.add_command(
+            label=LANG_TEXT[self.lang].get("edit", "Edit"),
+            command=self.edit_selected_row
+        )
+        self.menu.add_command(
+            label=LANG_TEXT[self.lang].get("delete", "Delete"),
+            command=self.delete_selected_row
+        )
+
         self.tree.bind("<Button-3>", self.show_context_menu)
 
         # ===============================
@@ -542,7 +825,6 @@ class DiagramApp(tk.Tk):
 
         self.tree.bind("<Motion>", on_tree_hover)
         self.tree.bind("<Leave>", hide_tooltip)
-
 
         # ===============================
         # Status Bar
@@ -590,7 +872,7 @@ class DiagramApp(tk.Tk):
         for idx, col_name in enumerate(labels):
             eng_col = self.columns_data["english"][idx]
 
-            # Skip hidden columns (based on manage_columns checkboxes)
+            # Skip hidden columns
             if not self.columns_visibility.get(eng_col, True):
                 continue
 
@@ -600,7 +882,7 @@ class DiagramApp(tk.Tk):
                 col = 0
 
             # Label
-            tk.Label(filters_container, text=col_name, fg="#005f99", bg="#f0f4f8")\
+            tk.Label(filters_container, text=col_name,width=15, fg="#005f99", bg="#f0f4f8", font=("Segoe UI", 9, "bold"))\
                 .grid(row=row, column=col, sticky="w", padx=(10, 0))
             col += 1
 
@@ -608,22 +890,71 @@ class DiagramApp(tk.Tk):
             if eng_col not in self.df.columns:
                 continue
 
-            # --- Special case: Search No always text input ---
             if eng_col == "Search No":
                 var = tk.StringVar()
-                tk.Entry(filters_container, textvariable=var, width=14, relief="solid")\
-                    .grid(row=row, column=col, padx=5)
-                var.trace_add("write", lambda *_: self.apply_filters())
-                widget = var
 
+                entry = tk.Entry(
+                    filters_container,
+                    textvariable=var,
+                    width=14,
+                    relief="flat",
+                    bd=1,
+                    highlightthickness=1,
+                    highlightbackground="black",
+                    font=("Segoe UI", 10),
+                    bg="#ccffcc"
+                )
+                entry.grid(row=row, column=col, padx=5, pady=0)
+
+                # Localized placeholder
+                placeholder = LANG_TEXT[self.lang].get("search_placeholder", " Search No...")
+
+                def show_placeholder():
+                    entry.delete(0, "end")
+                    entry.insert(0, placeholder)
+                    entry.config(fg="gray")
+
+                def hide_placeholder():
+                    if entry.get() == placeholder:
+                        entry.delete(0, "end")
+                    entry.config(fg="black")
+
+                # Initialize placeholder
+                show_placeholder()
+
+                def on_focus_in(event):
+                    hide_placeholder()
+
+                def on_focus_out(event):
+                    if entry.get().strip() == "":
+                        show_placeholder()
+
+                entry.bind("<FocusIn>", on_focus_in)
+                entry.bind("<FocusOut>", on_focus_out)
+
+                # Only allow numbers
+                def validate_input(new_value):
+                    return new_value == "" or new_value.isdigit()
+
+                vcmd = (self.register(validate_input), "%P")
+                entry.config(validate="key", validatecommand=vcmd)
+
+                # Trigger filter when typing
+                def on_var_change(*args):
+                    if entry.get() != placeholder:  # Only filter if not placeholder
+                        self.apply_filters()
+
+                var.trace_add("write", on_var_change)
+
+                widget = var
             else:
                 unique_vals = sorted(self.df[eng_col].dropna().unique())
                 if 0 < len(unique_vals) <= 20:  # categorical → dropdown
-                    widget = MultiSelectDropdown(filters_container, unique_vals, width=14, callback=self.apply_filters)
+                    widget = MultiSelectDropdown(filters_container, unique_vals, lang_text=LANG_TEXT, lang=self.lang,width=14, callback=self.apply_filters)
                     widget.grid(row=row, column=col, padx=5)
                 else:  # free text → entry
                     var = tk.StringVar()
-                    tk.Entry(filters_container, textvariable=var, width=14, relief="solid")\
+                    tk.Entry(filters_container, textvariable=var, width=14, relief="solid", bd=1)\
                         .grid(row=row, column=col, padx=5)
                     var.trace_add("write", lambda *_: self.apply_filters())
                     widget = var
@@ -631,13 +962,13 @@ class DiagramApp(tk.Tk):
             self.filters[eng_col] = widget
             col += 1
 
-
         # ==========================
         # ACTION BUTTONS (RIGHT)
         # ==========================
         action_container = tk.Frame(container, bg="#f0f4f8")
         action_container.grid(row=0, column=1, sticky="e", padx=10)
 
+        # Styled Add Button
         add_btn = tk.Button(
             action_container,
             text=self.t("add_entry") if hasattr(self, "t") else "Add Entry",
@@ -645,30 +976,42 @@ class DiagramApp(tk.Tk):
             bg="#005f99",
             activebackground="#3399cc",
             activeforeground="white",
-            font=("Segoe UI", 10, "bold"),
-            bd=0,
-            padx=10,
-            pady=5,
+            font=("Segoe UI", 10),
+            bd=1,
+            relief="solid",
+            padx=12,
+            pady=6,
             cursor="hand2",
             command=self.open_add_window
         )
         add_btn.pack(side="right")
 
+        # Styled Clear Button
         clear_btn = tk.Button(
             action_container,
             text=self.t("clear_filters") if hasattr(self, "t") else "Clear",
             fg="white",
-            bg="#888888",
-            activebackground="#666666",
+            bg="#005f99",
+            activebackground="#3399cc",
             activeforeground="white",
-            font=("Segoe UI", 10, "bold"),
-            bd=0,
-            padx=10,
-            pady=5,
+            font=("Segoe UI", 10),
+            bd=1,
+            relief="solid",
+            padx=12,
+            pady=6,
             cursor="hand2",
             command=self.clear_all_filters
         )
         clear_btn.pack(side="right", padx=5)
+
+        # --- Hover effect helper ---
+        def add_hover_effect(widget, normal_bg, hover_bg, fg="white"):
+            widget.bind("<Enter>", lambda e: widget.configure(bg=hover_bg, fg=fg))
+            widget.bind("<Leave>", lambda e: widget.configure(bg=normal_bg, fg=fg))
+
+        # Apply hover effects
+        add_hover_effect(add_btn, normal_bg="#005f99", hover_bg="#3399cc")
+        add_hover_effect(clear_btn, normal_bg="#005f99", hover_bg="#3399cc")
 
     def clear_all_filters(self):
         # Reset all filter widgets
@@ -730,12 +1073,23 @@ class DiagramApp(tk.Tk):
         self.result_label.config(text=f"{len(df)} Results")
 
     def export_filtered(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        checklist_name = LANG_TEXT[self.lang].get("checklist", "Checklist")
+        default_name = f"{today}_{checklist_name}.xlsx"
+
+
+
+
         if not hasattr(self, "filtered_df") or self.filtered_df.empty:
             messagebox.showinfo(self.t("error"), self.t("no_data_to_export"))
             return
 
-        file_path = filedialog.asksaveasfilename(defaultextension=".xlsx",
-                                                filetypes=[("Excel Files", "*.xlsx")])
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            initialfile=default_name,
+            filetypes=[("Excel Files", "*.xlsx")]
+        )
+
         if not file_path:
             return
 
@@ -757,6 +1111,31 @@ class DiagramApp(tk.Tk):
 
             # Save to chosen file path
             wb.save(file_path)
+
+            # === Add Form Control checkboxes via Excel COM automation ===
+            try:
+                excel = win32com.client.Dispatch("Excel.Application")
+                excel.Visible = False  # keep Excel hidden
+                wb_excel = excel.Workbooks.Open(file_path)
+                ws_excel = wb_excel.Sheets(1)
+
+                for r in range(start_row, start_row + len(export_df)):
+                    # Column B
+                    cell_b = ws_excel.Cells(r, 2)
+                    cb_b = ws_excel.CheckBoxes().Add(cell_b.Left, cell_b.Top, 15, 15)
+                    cb_b.Text = ""  # remove label
+
+                    # Column C
+                    cell_c = ws_excel.Cells(r, 3)
+                    cb_c = ws_excel.CheckBoxes().Add(cell_c.Left, cell_c.Top, 15, 15)
+                    cb_c.Text = ""  # remove label
+
+                wb_excel.Save()
+                wb_excel.Close()
+                excel.Quit()
+            except Exception as e:
+                messagebox.showwarning("Checkbox Insert",
+                                    f"Data exported, but checkboxes could not be added.\n{e}")
 
             # Show confirmation
             messagebox.showinfo(self.t("export_done"),
@@ -781,13 +1160,13 @@ class DiagramApp(tk.Tk):
 
         # Update window title
         self.title(self.text["app_title"])
-        self.title_lbl.config(text=self.text["app_title"])
-        self.export_btn.config(text=self.text["export_excel"])
-        self.settings_btn.config(text=self.text["settings"])
-        self.export_filtered_btn.config(text=self.text["export_filtered"])
+        self.title_lbl.config(text=self.text["app_title"], font=("Segoe UI", 20, "bold"))
+        self.export_btn.config(text=self.text["export_excel"], font=("Segoe UI", 10))
+        self.settings_btn.config(text=self.text["settings"], font=("Segoe UI", 10))
+        self.export_filtered_btn.config(text=self.text["export_filtered"], font=("Segoe UI", 10))
 
         # Update filter frame title
-        self.filter_frame.config(text=self.text["filters"])
+        self.filter_frame.config(text=self.text["filters"], font=("Segoe UI", 10, "bold"))
 
         # Reset Treeview columns
         self.tree["columns"] = COLUMNS + ["PDF"]
@@ -804,26 +1183,22 @@ class DiagramApp(tk.Tk):
 
         for i, col in enumerate(COLUMNS):
             header_text = headers[i]
-
-            # Add ⓘ indicator for the 5 note columns
             if col in note_columns_en or header_text in note_columns_jp:
-                header_text = f"{header_text} ⓘ"
                 self.tree.heading(col, text=header_text, anchor="center")
                 self.tree.column(col, width=200, anchor="center", stretch=False)
-            elif col == "Added By":
+            elif col == "Updated By":
                 self.tree.heading(col, text=header_text, anchor="center")
-                self.tree.column(col, width=120, anchor="center", stretch=False)
+                self.tree.column(col, width=150, anchor="center", stretch=False)
             elif col == "Upload Date":
                 self.tree.heading(col, text=header_text, anchor="center")
-                self.tree.column(col, width=160, anchor="center", stretch=False)
+                self.tree.column(col, width=180, anchor="center", stretch=False)
             else:
                 self.tree.heading(col, text=header_text, anchor="center")
-                self.tree.column(col, width=140, anchor="center", stretch=False)
+                self.tree.column(col, width=160, anchor="center", stretch=False)
 
         # PDF column (fixed)
         self.tree.heading("PDF", text=self.t("pdf_header"), anchor="center")
-        self.tree.column("PDF", width=100, anchor="center", stretch=False)
-
+        self.tree.column("PDF", width=120, anchor="center", stretch=False)
 
     def refresh_table(self, df):
         # Sort by numeric Search No
@@ -840,7 +1215,6 @@ class DiagramApp(tk.Tk):
         self.tree["columns"] = COLUMNS + ["PDF"]
         self.update_headers()
 
-        # Handle empty DataFrame
         if df.empty:
             no_record_msg = self.t("no_record_found")
             values = [no_record_msg] + ["" for _ in COLUMNS[1:]] + [""]
@@ -849,35 +1223,51 @@ class DiagramApp(tk.Tk):
                 "missing",
                 background="#f0f0f0",
                 foreground="gray",
-                font=("TkDefaultFont", 10, "italic")
+                font=("Segoe UI", 10, "italic")   # modern italic font
             )
             for col in self.tree["columns"]:
                 self.tree.column(col, anchor="center")
         else:
-            # Insert rows normally
             for _, row in df.iterrows():
                 pdf = find_pdf(row.get("Search No", ""))
-                status = self.t("pdf_exists") if pdf else self.t("pdf_missing")
-                tag = "exists" if pdf else "missing"
 
-                self.tree.insert(
-                    "",
-                    "end",
-                    values=[row.get(c, "") for c in COLUMNS] + [status],
-                    tags=(tag,)
-                )
+                if pdf:
+                    # PDF exists → show plain text only
+                    status = self.t("pdf_exists")
+                    item_id = self.tree.insert(
+                        "",
+                        "end",
+                        values=[row.get(c, "") for c in COLUMNS] + [status],
+                    )
+                    self.tree.item(item_id, tags=("pdf_exists",))
+                else:
+                    # PDF missing → show black ✖ symbol
+                    status = f"✖ {self.t('pdf_missing')}"
+                    item_id = self.tree.insert(
+                        "",
+                        "end",
+                        values=[row.get(c, "") for c in COLUMNS] + [status],
+                    )
+                    self.tree.item(item_id, tags=("pdf_missing",))
 
-        # Apply row striping
+            # Configure tags with modern italic font
+            self.tree.tag_configure("pdf_exists", foreground="#000000", font=("Segoe UI", 10, "italic"))
+            self.tree.tag_configure("pdf_missing", foreground="#000000", font=("Segoe UI", 10, "italic"))
+
+            # Reset non-PDF columns to default foreground
+            for item in self.tree.get_children():
+                values = self.tree.item(item, "values")
+                for i, col in enumerate(COLUMNS):
+                    self.tree.set(item, col, values[i])
+
+        # Apply row striping (alternating row colors for better readability)
         self.stripe_rows()
 
-        # Update Result Counter
+        # Update Result Counter with modern font
         result_count = len(df)
         total_count = len(self.df)
-        if result_count == total_count:
-            self.result_label.config(text=f"{result_count} Results")
-        else:
-            self.result_label.config(text=f"{result_count} of {total_count} Results")
-
+        result_text = f"{result_count} of {total_count} Results" if result_count != total_count else f"{result_count} Results"
+        self.result_label.config(text=result_text, font=("Segoe UI", 10, "italic", "bold"))
     # ---------- Right-click ----------
     def show_context_menu(self, event):
         row_id = self.tree.identify_row(event.y)
@@ -894,7 +1284,12 @@ class DiagramApp(tk.Tk):
         if messagebox.askyesno(self.t("delete_title"), self.t("delete_confirm")):
             idx = self.df[self.df["Search No"]==search_no].index
             self.df.drop(idx, inplace=True)
-            save_excel(self.df)
+            try:
+                save_excel_with_lock(self.df)
+            except Exception:
+                messagebox.showerror(self.t("error"), self.t("save_failed"))
+                return
+
             pdf_path = find_pdf(search_no)
             if pdf_path and os.path.exists(pdf_path):
                 os.remove(pdf_path)
@@ -1080,11 +1475,24 @@ class DiagramApp(tk.Tk):
             messagebox.showerror(self.t("error"), self.t("not_found_error"))
             return
 
-        # Update DataFrame values
-        for col in COLUMNS:
-            latest_df.loc[idx, col] = fields[col].get()
+        # Validate Search No before saving
+        search_no_val = fields["Search No"].get().strip()
+        if not search_no_val.isdigit():
+            messagebox.showerror(self.t("error"), self.t("search_no_numeric_error"))
+            return
 
-        # Handle PDF replacement
+        # Update DataFrame values (excluding "Updated By" and "Upload Date" for now)
+        for col in COLUMNS:
+            if col == "Search No":
+                latest_df.loc[idx, col] = search_no_val
+            elif col not in ["Updated By", "Upload Date"]:
+                latest_df.loc[idx, col] = fields[col].get()
+
+        # Now update only the "Updated By" and "Upload Date" fields
+        latest_df.loc[idx, "Updated By"] = getpass.getuser()  # Set the current user as "Updated By"
+        latest_df.loc[idx, "Upload Date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # Set the current date/time
+
+        # Handle PDF replacement if needed
         if pdf_var.get():
             if not os.path.exists(PDF_DIR):
                 os.makedirs(PDF_DIR)
@@ -1093,7 +1501,7 @@ class DiagramApp(tk.Tk):
             if old_pdf and os.path.exists(old_pdf):
                 os.remove(old_pdf)
 
-            search_no_norm = str(fields["Search No"].get()).zfill(3)
+            search_no_norm = str(search_no_val).zfill(3)
             type1 = fields.get("Type 1", tk.StringVar(value="")).get().strip()
             type2 = fields.get("Type 2", tk.StringVar(value="")).get().strip()
 
@@ -1181,7 +1589,6 @@ class DiagramApp(tk.Tk):
         tk.Button(btn_frame, text=self.t("close"), command=win.destroy).pack(side="left", padx=5)
 
     def manage_columns(self):
-        # Prevent multiple windows
         if hasattr(self, "columns_win") and self.columns_win is not None:
             if self.columns_win.winfo_exists():
                 self.columns_win.deiconify()
@@ -1189,194 +1596,246 @@ class DiagramApp(tk.Tk):
                 self.columns_win.focus_force()
                 return
 
-        # Create new window
         win = tk.Toplevel(self)
         self.columns_win = win
         win.title(self.t("manage_columns"))
-        win.geometry("500x400")
+        win.geometry("540x460")
+        win.resizable(False, False)
+
+        # Main container with padding
+        container = ttk.Frame(win, padding=20)
+        container.pack(fill="both", expand=True)
 
         def on_close():
-            # Save visibility state from Manage Columns Treeview
             self.columns_visibility = {}
             for item in self.columns_tree.get_children():
                 col_name = self.columns_tree.set(item, "Column")
-                # Map back to English column name
                 if self.lang == "Japanese":
                     idx = JAPANESE_COLUMNS.index(col_name)
                     eng_col = COLUMNS[idx]
                 else:
                     eng_col = col_name
-                self.columns_visibility[eng_col] = (
-                    self.columns_tree.set(item, "Visible") == self.t("visible_yes")
-                )
+                checkbox = self.columns_tree.set(item, "Visible")
+                self.columns_visibility[eng_col] = (checkbox == "☑")
 
             save_columns({
                 "english": COLUMNS,
                 "japanese": JAPANESE_COLUMNS,
                 "visible": self.columns_visibility
             })
+
             self.columns_win = None
             win.destroy()
-
-            # Refresh main UI once
             self.create_filters()
             self.update_headers()
             self.refresh_table(self.df)
 
         win.protocol("WM_DELETE_WINDOW", on_close)
 
-        # --- Treeview for Manage Columns ---
+        # -------- Treeview (Modernized) --------
         self.columns_tree = ttk.Treeview(
-            win,
+            container,
             columns=("Column", "Visible"),
             show="headings",
             selectmode="browse"
         )
-        self.columns_tree.heading("Column", text=self.t("column_header"))
-        self.columns_tree.heading("Visible", text=self.t("visible_header"))
-        self.columns_tree.column("Column", width=250)
-        self.columns_tree.column("Visible", width=80, anchor="center")
-        self.columns_tree.pack(fill="both", expand=True)
 
-        # Populate rows with column names only
-        headers_to_show = JAPANESE_COLUMNS if self.lang == "Japanese" else COLUMNS
+        self.columns_tree.heading("Column", text=self.t("column_header"), anchor="center")
+        self.columns_tree.heading("Visible", text=self.t("visible_header"), anchor="center")
+
+        self.columns_tree.column("Column", width=360, anchor="w")
+        self.columns_tree.column("Visible", width=120, anchor="center")
+        self.columns_tree.pack(fill="both", expand=True, pady=(0, 15))
+
+        # Style for row height (slightly taller rows)
+        style = ttk.Style()
+        style.configure("Treeview", rowheight=30)
+
         for eng, jpn in zip(COLUMNS, JAPANESE_COLUMNS):
-            visible = self.t("visible_yes") if self.columns_visibility.get(eng, True) else self.t("visible_no")
-            self.columns_tree.insert("", "end", values=(jpn if self.lang == "Japanese" else eng, visible))
+            visible = "☑" if self.columns_visibility.get(eng, True) else "☐"
+            self.columns_tree.insert(
+                "", "end",
+                values=(jpn if self.lang == "Japanese" else eng, visible)
+            )
 
-        # Toggle visibility on double click
+        # Toggle visibility on double-click
         def toggle_visible(event):
-            item = self.columns_tree.selection()
-            if item:
-                current = self.columns_tree.set(item, "Visible")
-                new_val = self.t("visible_no") if current == self.t("visible_yes") else self.t("visible_yes")
-                self.columns_tree.set(item, "Visible", new_val)
+            selection = self.columns_tree.selection()
+            if selection:
+                item_id = selection[0]
+                current = self.columns_tree.set(item_id, "Visible")
+                new_val = "☐" if current == "☑" else "☑"
+
+                if new_val == "☑":
+                    visible_count = sum(
+                        1 for i in self.columns_tree.get_children()
+                        if self.columns_tree.set(i, "Visible") == "☑"
+                    )
+                    if visible_count >= 8:
+                        tk.messagebox.showwarning(
+                            self.t("limit_title"),
+                            self.t("limit_message").format(limit=8)
+                        )
+                        return
+                self.columns_tree.set(item_id, "Visible", new_val)
 
         self.columns_tree.bind("<Double-1>", toggle_visible)
 
-        # --- Buttons ---
-        def add_column():
-            # Create a custom popup window
-            popup = tk.Toplevel(self)
-            popup.title(self.t("add_column"))
-            popup.geometry("400x250")
-            popup.transient(self)
-            popup.grab_set()
+        # -------- Add Column Button --------
+        add_column_btn = tk.Button(
+            container,
+            text=self.t("add_column"),
+            bg="#005f99", fg="white", activebackground="#3399cc", activeforeground="white",
+            font=("Segoe UI", 10, "bold"), cursor="hand2", bd=0, relief="solid",
+            padx=12, pady=6, command=lambda: self._open_add_column_popup()
+        )
+        add_column_btn.pack(pady=(0, 10))
 
-            tk.Label(popup, text=self.t("enter_column_name_english")).pack(pady=(10,0))
-            eng_var = tk.StringVar()
-            tk.Entry(popup, textvariable=eng_var).pack(pady=5)
+        # -------- Remove Column Button --------
+        remove_column_btn = tk.Button(
+            container,
+            text=self.t("remove_column"),
+            bg="#dc3545", fg="white", activebackground="#e63946", activeforeground="white",
+            font=("Segoe UI", 10, "bold"), cursor="hand2", bd=0, relief="solid",
+            padx=12, pady=6, command=self._remove_column
+        )
+        remove_column_btn.pack(pady=(0, 10))
 
-            tk.Label(popup, text=self.t("enter_column_name_japanese")).pack(pady=(10,0))
-            jpn_var = tk.StringVar()
-            tk.Entry(popup, textvariable=jpn_var).pack(pady=5)
+    def _open_add_column_popup(self):
+        popup = tk.Toplevel(self)
+        popup.title(self.t("add_column"))
+        popup.geometry("440x280")
+        popup.resizable(False, False)
+        popup.transient(self)
+        popup.grab_set()
 
-            def on_submit():
-                eng_name = eng_var.get().strip()
-                jpn_name = jpn_var.get().strip()
+        container = ttk.Frame(popup, padding=20)
+        container.pack(fill="both", expand=True)
 
-                if not eng_name or not jpn_name:
-                    messagebox.showerror(self.t("error"), self.t("invalid_column_name"))
-                    return
+        style = ttk.Style()
+        style.configure("Modern.TLabel", font=("Segoe UI", 10))
+        style.configure("Modern.TEntry", padding=6)
+        style.configure("Primary.TButton", font=("Segoe UI", 10, "bold"), padding=8, background="#28a745", foreground="white")
+        style.map("Primary.TButton", background=[("active", "#45c767")], foreground=[("active", "white")])
+        style.configure("Secondary.TButton", font=("Segoe UI", 9), padding=6, background="#005f99", foreground="white")
+        style.map("Secondary.TButton", background=[("active", "#3399cc")], foreground=[("active", "white")])
 
-                if eng_name in COLUMNS or jpn_name in JAPANESE_COLUMNS:
-                    messagebox.showerror(self.t("error"), self.t("column_exists").format(col=eng_name))
-                    return
+        # English column
+        ttk.Label(container, text=self.t("enter_column_name_english"), style="Modern.TLabel").pack(anchor="w")
+        eng_var = tk.StringVar()
+        ttk.Entry(container, textvariable=eng_var, style="Modern.TEntry").pack(fill="x", pady=(5, 15))
 
-                try:
-                   # Find index of "Upload Date" so we can insert before it
-                    if "Upload Date" in COLUMNS:
-                        idx = COLUMNS.index("Upload Date")
-                    else:
-                        idx = len(COLUMNS)  # fallback: end of list if not found
+        # Japanese column
+        ttk.Label(container, text=self.t("enter_column_name_japanese"), style="Modern.TLabel").pack(anchor="w")
+        jpn_var = tk.StringVar()
+        ttk.Entry(container, textvariable=jpn_var, style="Modern.TEntry").pack(fill="x", pady=(5, 20))
 
-                    COLUMNS.insert(idx, eng_name)
-                    JAPANESE_COLUMNS.insert(idx, jpn_name)
-                    self.df.insert(idx, eng_name, "")  # insert empty column in DataFrame at same position
+        # Buttons
+        btn_frame = ttk.Frame(container)
+        btn_frame.pack(fill="x")
 
+        def on_submit():
+            eng_name = eng_var.get().strip()
+            jpn_name = jpn_var.get().strip()
 
-                    self.columns_tree.insert(
-                        "", "end",
-                        values=(jpn_name if self.lang == "Japanese" else eng_name, self.t("visible_yes"))
-                    )
-                    self.columns_visibility[eng_name] = True
-
-                    save_columns({"english": COLUMNS, "japanese": JAPANESE_COLUMNS, "visible": self.columns_visibility})
-                    save_excel(self.df)
-
-                    self.create_filters()
-                    self.update_headers()
-                    self.refresh_table(self.df)
-
-                    messagebox.showinfo(self.t("success"), self.t("column_added").format(col=eng_name))
-                    popup.destroy()
-                except Exception as e:
-                    messagebox.showerror(self.t("error"), f"{self.t('add_failed')}: {e}")
-
-            tk.Button(popup, text=self.t("save_changes"), command=on_submit).pack(pady=10)
-            tk.Button(popup, text=self.t("cancel"), command=popup.destroy).pack()
-
-        def remove_column():
-            item = self.columns_tree.selection()
-            if not item:
-                messagebox.showerror(self.t("error"), self.t("no_selection"))
+            if not eng_name or not jpn_name:
+                messagebox.showerror(self.t("error"), self.t("invalid_column_name"))
+                return
+            if eng_name in COLUMNS or jpn_name in JAPANESE_COLUMNS:
+                messagebox.showerror(self.t("error"), self.t("column_exists").format(col=eng_name))
                 return
 
-            col_name = self.columns_tree.set(item, "Column")
-            if self.lang == "Japanese":
-                idx = JAPANESE_COLUMNS.index(col_name)
-                eng_col = COLUMNS[idx]
-            else:
-                idx = COLUMNS.index(col_name)
-                eng_col = col_name
-
-            if eng_col in ["Search No", "Reference model"]:
-                messagebox.showerror(self.t("error"), self.t("cannot_remove"))
-                return
             try:
-                del COLUMNS[idx]
-                del JAPANESE_COLUMNS[idx]
-                self.df.drop(columns=[eng_col], inplace=True)
-                self.columns_tree.delete(item)
-                self.columns_visibility.pop(eng_col, None)
+                if "Upload Date" in COLUMNS:
+                    idx = COLUMNS.index("Upload Date")
+                else:
+                    idx = len(COLUMNS)
 
-                save_columns({"english": COLUMNS, "japanese": JAPANESE_COLUMNS, "visible": self.columns_visibility})
-                save_excel(self.df)
+                COLUMNS.insert(idx, eng_name)
+                JAPANESE_COLUMNS.insert(idx, jpn_name)
+                self.df.insert(idx, eng_name, "")
 
-                # Refresh main UI once
+                self.columns_tree.insert(
+                    "", "end",
+                    values=(jpn_name if self.lang == "Japanese" else eng_name, "☐")
+                )
+                self.columns_visibility[eng_name] = False
+
+                save_columns({
+                    "english": COLUMNS,
+                    "japanese": JAPANESE_COLUMNS,
+                    "visible": self.columns_visibility
+                })
+                save_excel_with_lock(self.df)
+
                 self.create_filters()
                 self.update_headers()
                 self.refresh_table(self.df)
-                messagebox.showinfo(self.t("success"), self.t("column_removed").format(col=eng_col))
+
+                messagebox.showinfo(self.t("success"), self.t("column_added").format(col=eng_name))
+                popup.destroy()
+
             except Exception as e:
-                messagebox.showerror(self.t("error"), f"{self.t('remove_failed')}: {e}")
+                messagebox.showerror(self.t("error"), f"{self.t('add_failed')}: {e}")
 
+        # Buttons side by side
+        ttk.Button(btn_frame, text=self.t("cancel"), style="Secondary.TButton", command=popup.destroy).pack(side="right")
+        ttk.Button(btn_frame, text=self.t("save_changes"), style="Primary.TButton", command=on_submit).pack(side="right", padx=(0, 10))
 
-        tk.Button(win, text=self.t("add_column"), command=add_column).pack(side="left", padx=10, pady=5)
-        tk.Button(win, text=self.t("remove_column"), command=remove_column).pack(side="right", padx=10, pady=5)
+    def _remove_column(self):
+        item = self.columns_tree.selection()
+        if not item:
+            messagebox.showerror(self.t("error"), self.t("no_selection"))
+            return
 
+        col_name = self.columns_tree.set(item, "Column")
+        if self.lang == "Japanese":
+            idx = JAPANESE_COLUMNS.index(col_name)
+            eng_col = COLUMNS[idx]
+        else:
+            idx = COLUMNS.index(col_name)
+            eng_col = col_name
 
+        if eng_col in ["Search No", "Reference model"]:
+            messagebox.showerror(self.t("error"), self.t("cannot_remove"))
+            return
+        try:
+            del COLUMNS[idx]
+            del JAPANESE_COLUMNS[idx]
+            self.df.drop(columns=[eng_col], inplace=True)
+            self.columns_tree.delete(item)
+            self.columns_visibility.pop(eng_col, None)
+
+            save_columns({"english": COLUMNS, "japanese": JAPANESE_COLUMNS, "visible": self.columns_visibility})
+            save_excel_with_lock(self.df)
+
+            self.create_filters()
+            self.update_headers()
+            self.refresh_table(self.df)
+            messagebox.showinfo(self.t("success"), self.t("column_removed").format(col=eng_col))
+        except Exception as e:
+            messagebox.showerror(self.t("error"), f"{self.t('remove_failed')}: {e}")
     # ---------- Settings ----------
     def open_settings(self):
-        #  Prevent multiple windows
+        # Prevent multiple windows
         if hasattr(self, "settings_win") and self.settings_win is not None:
             if self.settings_win.winfo_exists():
-                # Bring the existing window to front instead of opening a new one
                 self.settings_win.deiconify()
-                self.settings_win.lift() 
+                self.settings_win.lift()
                 self.settings_win.focus_force()
                 return
 
         win = tk.Toplevel(self)
-        self.settings_win = win  # store reference
+        self.settings_win = win
         win.title(self.t("settings_title"))
-        win.geometry("500x350")
+        win.geometry("520x450")
+        win.resizable(False, False)
 
-        # Destroy reference when window is closed
+        # Close callback
         def on_close():
-            if hasattr(self, "columns_win") and self.columns_win is not None: 
-                if self.columns_win.winfo_exists(): 
-                    self.columns_win.destroy() 
+            if hasattr(self, "columns_win") and self.columns_win is not None:
+                if self.columns_win.winfo_exists():
+                    self.columns_win.destroy()
                     self.columns_win = None
             self.settings_win = None
             win.destroy()
@@ -1385,6 +1844,10 @@ class DiagramApp(tk.Tk):
         excel_var = tk.StringVar(value=EXCEL_PATH)
         pdf_var = tk.StringVar(value=PDF_DIR)
         lang_var = tk.StringVar(value=self.lang)
+
+        def add_hover_effect(widget, normal_bg, hover_bg, fg="white"):
+            widget.bind("<Enter>", lambda e: widget.configure(bg=hover_bg, fg=fg))
+            widget.bind("<Leave>", lambda e: widget.configure(bg=normal_bg, fg=fg))
 
         def update_text(*args):
             lang = lang_var.get()
@@ -1397,53 +1860,117 @@ class DiagramApp(tk.Tk):
             columns_btn.config(text=LANG_TEXT[lang]["manage_columns"])
             win.title(LANG_TEXT[lang]["settings_title"])
 
-        # Excel
-        excel_label = tk.Label(win, text=LANG_TEXT[lang_var.get()]["excel_file"])
-        excel_label.pack(anchor="w", padx=10)
-        excel_frame = tk.Frame(win)
-        excel_frame.pack(fill="x", padx=10)
-        tk.Entry(excel_frame, textvariable=excel_var).pack(side="left", fill="x", expand=True)
+        # ---------- Main container ----------
+        container = tk.Frame(win, padx=25, pady=20)
+        container.pack(fill="both", expand=True)
+
+        field_pad_y = 8  # space between label and entry
+        section_pad_y = 15  # space between sections
+
+        # ---------- Excel ----------
+        excel_label = tk.Label(container,
+                            text=LANG_TEXT[lang_var.get()]["excel_file"],
+                            font=("Segoe UI", 10, "bold"))
+        excel_label.pack(anchor="w", pady=(0, field_pad_y))
+
+        excel_frame = tk.Frame(container)
+        excel_frame.pack(fill="x", pady=(0, section_pad_y))
+
         excel_browse_btn = tk.Button(
             excel_frame,
             text=LANG_TEXT[lang_var.get()]["browse_excel"],
+            fg="white", bg="#005f99",
+            activebackground="#3399cc", activeforeground="white",
+            font=("Segoe UI", 10, "bold"), bd=0,
+            padx=12, pady=6, cursor="hand2",
             command=lambda: excel_var.set(filedialog.askopenfilename(
                 title=LANG_TEXT[lang_var.get()]["browse_excel"],
                 filetypes=[("Excel files", "*.xlsx *.xls")]
             ))
         )
-        excel_browse_btn.pack(side="left", padx=5)
+        excel_browse_btn.pack(side="left", padx=(0, 8))
+        add_hover_effect(excel_browse_btn, "#005f99", "#3399cc")
 
-        # PDF folder
-        pdf_label = tk.Label(win, text=LANG_TEXT[lang_var.get()]["pdf_folder"])
-        pdf_label.pack(anchor="w", padx=10, pady=(10,0))
-        pdf_frame = tk.Frame(win)
-        pdf_frame.pack(fill="x", padx=10)
-        tk.Entry(pdf_frame, textvariable=pdf_var).pack(side="left", fill="x", expand=True)
+        excel_entry = tk.Entry(excel_frame, textvariable=excel_var,
+                            font=("Segoe UI", 10),
+                            state="readonly",
+                            relief="solid", bd=1,
+                            highlightthickness=1, highlightbackground="#cccccc",
+                            justify="left")
+        excel_entry.pack(side="left", fill="x", expand=True, ipady=6)
+
+        # ---------- PDF ----------
+        pdf_label = tk.Label(container,
+                            text=LANG_TEXT[lang_var.get()]["pdf_folder"],
+                            font=("Segoe UI", 10, "bold"))
+        pdf_label.pack(anchor="w", pady=(0, field_pad_y))
+
+        pdf_frame = tk.Frame(container)
+        pdf_frame.pack(fill="x", pady=(0, section_pad_y))
+        
         pdf_browse_btn = tk.Button(
             pdf_frame,
             text=LANG_TEXT[lang_var.get()]["browse_pdf"],
+            fg="white", bg="#005f99",
+            activebackground="#3399cc", activeforeground="white",
+            font=("Segoe UI", 10, "bold"), bd=0,
+            padx=12, pady=6, cursor="hand2",
             command=lambda: pdf_var.set(filedialog.askdirectory(
                 title=LANG_TEXT[lang_var.get()]["browse_pdf"]
             ))
         )
-        pdf_browse_btn.pack(side="left", padx=5)
+        pdf_browse_btn.pack(side="left", padx=(0, 8))
+        add_hover_effect(pdf_browse_btn, "#005f99", "#3399cc")
 
-        # Language
-        lang_label = tk.Label(win, text=LANG_TEXT[lang_var.get()]["default_language"])
-        lang_label.pack(anchor="w", padx=10, pady=(10,0))
-        lang_combobox = ttk.Combobox(win, textvariable=lang_var, values=list(LANG_TEXT.keys()))
-        lang_combobox.pack(anchor="w", padx=10)
+        pdf_entry = tk.Entry(pdf_frame, textvariable=pdf_var,
+                            font=("Segoe UI", 10),
+                            state="readonly",
+                            relief="solid", bd=1,
+                            highlightthickness=1, highlightbackground="#cccccc",
+                            justify="left")
+        pdf_entry.pack(side="left", fill="x", expand=True, ipady=6)
 
-        # Manage columns
-        columns_btn = ttk.Button(win, text=LANG_TEXT[lang_var.get()]["manage_columns"], command=self.manage_columns)
-        columns_btn.pack(pady=5)
 
-        # Save
-        save_btn = ttk.Button(win, text=LANG_TEXT[lang_var.get()]["save_settings"],
-            command=lambda:self.save_settings(win, excel_var, pdf_var, lang_var))
-        save_btn.pack(pady=20)
+        # ---------- Language ----------
+        lang_label = tk.Label(container,
+                            text=LANG_TEXT[lang_var.get()]["default_language"],
+                            font=("Segoe UI", 10, "bold"))
+        lang_label.pack(anchor="w", pady=(0, field_pad_y))
+
+        lang_combobox = ttk.Combobox(container, textvariable=lang_var,
+                                    values=list(LANG_TEXT.keys()),
+                                    font=("Segoe UI", 10), state="readonly")
+        lang_combobox.pack(anchor="w", pady=(0, section_pad_y), fill="x")
+
+        # ---------- Buttons ----------
+        button_frame = tk.Frame(container)
+        button_frame.pack(fill="x", pady=(10, 0))
+
+        columns_btn = tk.Button(
+            button_frame,
+            text=LANG_TEXT[lang_var.get()]["manage_columns"],
+            fg="white", bg="#005f99",
+            activebackground="#3399cc", activeforeground="white",
+            font=("Segoe UI", 10, "bold"), bd=0,
+            padx=14, pady=6, cursor="hand2",
+            command=self.manage_columns
+        )
+        columns_btn.pack(fill="x", pady=(0, 8))
+        add_hover_effect(columns_btn, "#005f99", "#3399cc")
+
+        save_btn = tk.Button(
+            button_frame,
+            text=LANG_TEXT[lang_var.get()]["save_settings"],
+            fg="white", bg="#28a745",
+            activebackground="#45c767", activeforeground="white",
+            font=("Segoe UI", 10, "bold"), bd=0,
+            padx=14, pady=6, cursor="hand2",
+            command=lambda: self.save_settings(win, excel_var, pdf_var, lang_var)
+        )
+        save_btn.pack(fill="x")
+        add_hover_effect(save_btn, "#28a745", "#45c767")
+
         lang_var.trace_add("write", update_text)
-
 
     def save_settings(self, win, excel_var, pdf_var, lang_var):
         global EXCEL_PATH, PDF_DIR
@@ -1499,7 +2026,18 @@ class DiagramApp(tk.Tk):
 
         info_columns = ["Model Name", "Target Part Name", "Motor Specification", "Issue Classification", "Update Info"]
 
+        # Define which columns to skip
+        skip_columns = {"Updated By", "Upload Date"}
+
+        def only_numbers(char): 
+            return char.isdigit() or char == "" 
+        
+        vcmd = (self.register(only_numbers), "%S")
+
         for i, col in enumerate(COLUMNS):
+            if col in skip_columns:
+                continue  # Skip these fields entirely
+
             # Frame for label + info icon
             label_frame = tk.Frame(left_inner)
             label_frame.pack(anchor="w", padx=10, pady=(5, 0))
@@ -1546,12 +2084,19 @@ class DiagramApp(tk.Tk):
                 ent = ttk.Combobox(left_inner, textvariable=var, values=DROPDOWN_OPTIONS[col], width=80)
                 ent.state(["!readonly"])
             else:
-                ent = tk.Entry(left_inner, textvariable=var, width=80)
+                if col == "Search No":
+                    ent = tk.Entry(
+                        left_inner,
+                        textvariable=var,
+                        width=80,
+                        validate="key",
+                        validatecommand=vcmd
+                    )
+                else:
+                    ent = tk.Entry(left_inner, textvariable=var, width=80)
 
             ent.pack(fill="x", padx=10, pady=(0, 5))
             fields[col] = {"var": var, "widget": ent}
-
-
 
         # ---------- Right: PDF preview ----------
         right_frame_outer = tk.Frame(paned)
@@ -1654,14 +2199,14 @@ class DiagramApp(tk.Tk):
         shutil.copy(pdf_var.get(), new_pdf_path)
 
         # Add new entry
-        new_entry = {c: fields[c]["var"].get() for c in COLUMNS if c not in ["Added By", "Upload Date"]}
-        new_entry["Added By"] = getpass.getuser()
+        new_entry = {c: fields[c]["var"].get() for c in COLUMNS if c not in ["Updated By", "Upload Date"]}
+        new_entry["Updated By"] = getpass.getuser()
         new_entry["Upload Date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         latest_df = pd.concat([latest_df, pd.DataFrame([new_entry])], ignore_index=True)
 
         # --- Update dropdowns.json ---
         try:
-            with open("dropdowns.json", "r", encoding="utf-8") as f:
+            with open(DROPDOWN_FILE, "r", encoding="utf-8") as f:
                 dropdowns = json.load(f)
         except FileNotFoundError:
             dropdowns = {}
@@ -1680,7 +2225,7 @@ class DiagramApp(tk.Tk):
                 if isinstance(widget, ttk.Combobox):
                     widget.configure(values=dropdowns[col])
 
-        with open("dropdowns.json", "w", encoding="utf-8") as f:
+        with open(DROPDOWN_FILE, "w", encoding="utf-8") as f:
             json.dump(dropdowns, f, ensure_ascii=False, indent=2)
 
         # Sort before saving

@@ -5,13 +5,15 @@
         "Contents",
         "Before correction",
         "After correction",
+        "Verification Meeting – Implementation Period",
+        "Record No.",
         "Model Name",
         "Target Part Name",
         "Motor Specification",
         "Issue Classification",
         "Update Info",
         "Upload Date",
-        "Added By"
+        "Updated By"
     ],
     "japanese": [
         "検索No.",
@@ -19,13 +21,15 @@
         "内容",
         "訂正前",
         "訂正後",
+        "検証会_実施期",
+        "記録No.",
         "機種名",
         "対象部品名",
         "モータ仕様",
         "指摘項目の分類",
         "更新情報",
         "アップロード日",
-        "追加者"
+        "更新者"
     ],
     "visible": {
         "Search No": true,
@@ -33,12 +37,14 @@
         "Contents": false,
         "Before correction": false,
         "After correction": false,
+        "Verification Meeting – Implementation Period": false,
+        "Record No.": false,
         "Model Name": true,
         "Target Part Name": true,
         "Motor Specification": true,
         "Issue Classification": true,
         "Update Info": true,
         "Upload Date": false,
-        "Added By": false
+        "Updated By": false
     }
 }

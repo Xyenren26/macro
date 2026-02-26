@@ -1,12 +1,12 @@
 {
   "Model Name": [
+    "Sample1",
     "WR18",
     "WR19",
     "その他",
     "機種共通"
   ],
   "Target Part Name": [
-    "MOTOR ASSY",
     "ARMATURE ASSY (UNIT)",
     "ARMATURE SHAFT",
     "BRUSH CARBON",
@@ -26,6 +26,7 @@
     "MAGNET SENSOR",
     "METAL",
     "MOTOR (SUB) UNIT",
+    "MOTOR ASSY",
     "MOTOR SUB ASSY",
     "O RING",
     "PCB ASSY",
